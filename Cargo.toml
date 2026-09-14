@@ -1,0 +1,28 @@
+[package]
+name = "evorule-wasm-demo"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Minimal WASM prototype: load rules -> execute command -> verify BLAKE3 audit chain (determinism spike)"
+
+# cdylib -> .wasm for Node.js; rlib -> lets native example link run_core()
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+evorule-governance = { path = "../evorule-governance", version = "0.5.0" }
+evorule-reactor = { path = "../evorule-reactor", version = "0.5.0" }
+evorule-tcb = { path = "../evorule-tcb", version = "0.5.0" }
+serde_json = "1"
+
+# wasm-bindgen only needed for the wasm32 entry; pure run_core has no async runtime.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+# Native comparison program (same run_core logic, same inputs)
+[[example]]
+name = "native_demo"
+
+# Day5 native performance benchmark
+[[example]]
+name = "bench_native"
