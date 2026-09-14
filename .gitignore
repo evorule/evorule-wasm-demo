@@ -1,2 +1,5 @@
 /pkg/
 /target/
+# 合并规则构建产物（determinism_run.js 每次运行重新生成，不入库）
+/rules_merged.json
+
