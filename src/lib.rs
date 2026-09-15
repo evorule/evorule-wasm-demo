@@ -30,10 +30,20 @@
 //! **replays** `execute_transition` from the original inputs (D11 contract).
 
 use evorule_governance::Auditor;
-use evorule_reactor::{
-    serde_to_tcb, tcb_to_serde, Fact, FactId, FactsLog, IoType, TraceHit,
-};
-use evorule_tcb::{execute_transition, JsonValue, RuleHit, TransitionResult};
+use evorule_reactor::{serde_to_tcb, tcb_to_serde, Fact, FactId, FactsLog, TraceHit};
+use evorule_tcb::{execute_transition, JsonValue, TransitionResult};
+
+// `IoType` and `RuleHit` are referenced **only** from inside the
+// `#[cfg(target_arch = "wasm32")]`-gated `EvoRuleEngine` impl blocks below
+// (`Fact::IoRequest { io_type: IoType::new(..) }` and the `|h: &RuleHit|`
+// closure annotation). On a native build that code is cfg'd out, so a
+// top-level `use` of these two names is genuinely unused and fails the
+// workspace lint stage under `-D warnings` (clippy: `unused_imports`).
+// Keep them behind the same cfg predicate as their only users.
+#[cfg(target_arch = "wasm32")]
+use evorule_reactor::IoType;
+#[cfg(target_arch = "wasm32")]
+use evorule_tcb::RuleHit;
 
 /// Embedded constitution (the same `evorule-tcb/core_eval.json` the TCB tests
 /// use). Compiled in via include_str! so it is byte-identical on native and
@@ -68,8 +78,8 @@ pub fn run_core(rules_json: &str, command_json: &str) -> String {
     // --- 3. Pure TCB state transition (no tokio, no clock) ---
     let payload = JsonValue::empty_object();
     let queue: Vec<JsonValue> = Vec::new();
-    let result = execute_transition(&core_eval, &instruction, &payload, &queue)
-        .expect("execute_transition");
+    let result =
+        execute_transition(&core_eval, &instruction, &payload, &queue).expect("execute_transition");
     let (new_payload, new_queue, rule_hits) = match result {
         TransitionResult::State {
             new_payload,
@@ -113,7 +123,10 @@ pub fn run_core(rules_json: &str, command_json: &str) -> String {
         })
         .expect("append TransitionTrace");
     facts_log
-        .append(Fact::Stable { id: FactId(4), version: 1 })
+        .append(Fact::Stable {
+            id: FactId(4),
+            version: 1,
+        })
         .expect("append Stable");
 
     // --- 5. Build + verify the BLAKE3 audit chain ---
@@ -193,9 +206,9 @@ impl EvoRuleEngine {
             .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("parse rules_json: {e}")))?;
         let arr: &Vec<serde_json::Value> = match &parsed {
             serde_json::Value::Array(a) => a,
-            serde_json::Value::Object(_) => parsed["transform"]
-                .as_array()
-                .ok_or_else(|| wasm_bindgen::JsValue::from_str("rules object has no \"transform\" array"))?,
+            serde_json::Value::Object(_) => parsed["transform"].as_array().ok_or_else(|| {
+                wasm_bindgen::JsValue::from_str("rules object has no \"transform\" array")
+            })?,
             other => {
                 return Err(wasm_bindgen::JsValue::from_str(&format!(
                     "rules_json must be an array or rule-set object, got {}",
@@ -215,7 +228,10 @@ impl EvoRuleEngine {
     /// - `TransitionResult::IoRequired` -> do **not** commit; remember the
     ///   instruction and return an `io_required` JSON for JS to resolve via
     ///   `resolve_io` (D11 replay contract).
-    pub fn execute_instruction(&mut self, instruction_json: &str) -> Result<String, wasm_bindgen::JsValue> {
+    pub fn execute_instruction(
+        &mut self,
+        instruction_json: &str,
+    ) -> Result<String, wasm_bindgen::JsValue> {
         let cmd: serde_json::Value = serde_json::from_str(instruction_json)
             .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("parse instruction: {e}")))?;
         let instruction = serde_to_tcb(&cmd);
@@ -244,13 +260,11 @@ impl EvoRuleEngine {
             .ok_or_else(|| wasm_bindgen::JsValue::from_str("replay payload is not an object"))?;
         map.insert("__io_result__".to_string(), io_result_tcb);
 
-        let result = execute_transition(
-            &self.rules,
-            &instruction,
-            &replay_payload,
-            &self.view_queue,
-        )
-        .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("replay execute_transition: {e}")))?;
+        let result =
+            execute_transition(&self.rules, &instruction, &replay_payload, &self.view_queue)
+                .map_err(|e| {
+                    wasm_bindgen::JsValue::from_str(&format!("replay execute_transition: {e}"))
+                })?;
 
         self.handle_transition_result(result, &instruction, io_id)
     }
@@ -300,7 +314,12 @@ impl EvoRuleEngine {
         let mut payload = JsonValue::empty_object();
         let mut queue: Vec<JsonValue> = Vec::new();
         for f in &facts {
-            if let Fact::StateTransition { new_payload, new_queue, .. } = f {
+            if let Fact::StateTransition {
+                new_payload,
+                new_queue,
+                ..
+            } = f
+            {
                 v += 1;
                 payload = new_payload.clone();
                 queue = new_queue.clone();
@@ -363,13 +382,19 @@ impl EvoRuleEngine {
             // Command for traceability so the fact chain stays causal.
             let id = self.next_id();
             self.facts_log
-                .append(Fact::Command { id, instruction: instruction.clone() })
+                .append(Fact::Command {
+                    id,
+                    instruction: instruction.clone(),
+                })
                 .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append Command: {e}")))?;
             c
         } else {
             let id = self.next_id();
             self.facts_log
-                .append(Fact::Command { id, instruction: instruction.clone() })
+                .append(Fact::Command {
+                    id,
+                    instruction: instruction.clone(),
+                })
                 .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append Command: {e}")))?;
             id
         };
@@ -394,7 +419,11 @@ impl EvoRuleEngine {
     ) -> Result<String, wasm_bindgen::JsValue> {
         let cause = cause.unwrap_or(FactId(0));
         match result {
-            TransitionResult::State { new_payload, new_queue, rule_hits } => {
+            TransitionResult::State {
+                new_payload,
+                new_queue,
+                rule_hits,
+            } => {
                 let st_id = self.next_id();
                 self.facts_log
                     .append(Fact::StateTransition {
@@ -403,7 +432,9 @@ impl EvoRuleEngine {
                         new_payload: new_payload.clone(),
                         new_queue: new_queue.clone(),
                     })
-                    .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append StateTransition: {e}")))?;
+                    .map_err(|e| {
+                        wasm_bindgen::JsValue::from_str(&format!("append StateTransition: {e}"))
+                    })?;
 
                 let trace_hits: Vec<TraceHit> = rule_hits
                     .iter()
@@ -415,13 +446,22 @@ impl EvoRuleEngine {
                     .collect();
                 let trace_id = self.next_id();
                 self.facts_log
-                    .append(Fact::TransitionTrace { id: trace_id, cause: st_id, rule_hits: trace_hits })
-                    .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append TransitionTrace: {e}")))?;
+                    .append(Fact::TransitionTrace {
+                        id: trace_id,
+                        cause: st_id,
+                        rule_hits: trace_hits,
+                    })
+                    .map_err(|e| {
+                        wasm_bindgen::JsValue::from_str(&format!("append TransitionTrace: {e}"))
+                    })?;
 
                 let version = self.facts_log.version();
                 let stable_id = self.next_id();
                 self.facts_log
-                    .append(Fact::Stable { id: stable_id, version })
+                    .append(Fact::Stable {
+                        id: stable_id,
+                        version,
+                    })
                     .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append Stable: {e}")))?;
 
                 self.view_payload = new_payload;
@@ -460,7 +500,9 @@ impl EvoRuleEngine {
                         io_type: IoType::new(&io_type),
                         params: params.clone(),
                     })
-                    .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append IoRequest: {e}")))?;
+                    .map_err(|e| {
+                        wasm_bindgen::JsValue::from_str(&format!("append IoRequest: {e}"))
+                    })?;
                 self.pending_instruction = Some(instruction.clone());
                 self.pending_io_id = Some(io_id);
                 self.auditor.audit_new();
@@ -481,7 +523,9 @@ impl EvoRuleEngine {
                         reason: reason.clone(),
                         instruction: instruction.clone(),
                     })
-                    .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append Violation: {e}")))?;
+                    .map_err(|e| {
+                        wasm_bindgen::JsValue::from_str(&format!("append Violation: {e}"))
+                    })?;
                 self.auditor.audit_new();
                 Ok(serde_json::json!({
                     "type": "halted",
@@ -490,7 +534,11 @@ impl EvoRuleEngine {
                 })
                 .to_string())
             }
-            TransitionResult::Ignored { instruction_type, reason, rule_hits } => {
+            TransitionResult::Ignored {
+                instruction_type,
+                reason,
+                rule_hits,
+            } => {
                 self.auditor.audit_new();
                 let hits_json: Vec<serde_json::Value> = rule_hits
                     .iter()
@@ -556,8 +604,7 @@ pub fn bench_load_rules(n: usize, reps: usize) -> String {
 
     let mut checksum: u64 = 0;
     for _ in 0..reps {
-        let v: Vec<serde_json::Value> =
-            serde_json::from_str(&json).expect("parse rules array");
+        let v: Vec<serde_json::Value> = serde_json::from_str(&json).expect("parse rules array");
         let t: Vec<JsonValue> = v.iter().map(serde_to_tcb).collect();
         // Touch every element so neither parse nor convert is elided.
         checksum = checksum.wrapping_add(t.len() as u64);

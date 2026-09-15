@@ -70,15 +70,26 @@ impl Engine {
 
         let cmd_id = self.next_id();
         self.facts_log
-            .append(Fact::Command { id: cmd_id, instruction: instruction.clone() })
+            .append(Fact::Command {
+                id: cmd_id,
+                instruction: instruction.clone(),
+            })
             .unwrap();
 
-        let result =
-            execute_transition(&self.rules, &instruction, &self.view_payload, &self.view_queue)
-                .unwrap();
+        let result = execute_transition(
+            &self.rules,
+            &instruction,
+            &self.view_payload,
+            &self.view_queue,
+        )
+        .unwrap();
 
         match result {
-            TransitionResult::State { new_payload, new_queue, rule_hits } => {
+            TransitionResult::State {
+                new_payload,
+                new_queue,
+                rule_hits,
+            } => {
                 let st_id = self.next_id();
                 self.facts_log
                     .append(Fact::StateTransition {
@@ -94,18 +105,25 @@ impl Engine {
                     .map(|h| TraceHit {
                         index: h.index as u64,
                         instr_type: h.instr_type.clone(),
-                        hit: h.hit.clone(),
+                        hit: h.hit,
                     })
                     .collect();
                 let trace_id = self.next_id();
                 self.facts_log
-                    .append(Fact::TransitionTrace { id: trace_id, cause: st_id, rule_hits: trace_hits })
+                    .append(Fact::TransitionTrace {
+                        id: trace_id,
+                        cause: st_id,
+                        rule_hits: trace_hits,
+                    })
                     .unwrap();
 
                 let version = self.facts_log.version();
                 let stable_id = self.next_id();
                 self.facts_log
-                    .append(Fact::Stable { id: stable_id, version })
+                    .append(Fact::Stable {
+                        id: stable_id,
+                        version,
+                    })
                     .unwrap();
 
                 self.view_payload = new_payload;
@@ -161,8 +179,12 @@ impl Engine {
 }
 
 fn main() {
-    let rules_path = std::env::args().nth(1).expect("usage: determinism_driver <rules> <plan>");
-    let plan_path = std::env::args().nth(2).expect("usage: determinism_driver <rules> <plan>");
+    let rules_path = std::env::args()
+        .nth(1)
+        .expect("usage: determinism_driver <rules> <plan>");
+    let plan_path = std::env::args()
+        .nth(2)
+        .expect("usage: determinism_driver <rules> <plan>");
 
     let rules_json = fs::read_to_string(&rules_path).expect("read rules");
     let plan: serde_json::Value =
@@ -209,5 +231,5 @@ fn main() {
         "sequence_final_verified": final_verified,
     });
     // 机器可读：仅打印 JSON 本体（stderr 留给日志）。
-    println!("{}", out.to_string());
+    println!("{out}");
 }
