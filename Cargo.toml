@@ -10,9 +10,9 @@ description = "Minimal WASM prototype: load rules -> execute command -> verify B
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-evorule-governance = { path = "../evorule-governance", version = "0.6.0" }
-evorule-reactor = { path = "../evorule-reactor", version = "0.6.0" }
-evorule-tcb = { path = "../evorule-tcb", version = "0.6.0" }
+evorule-governance = { path = "../evorule-governance", version = "0.6.1" }
+evorule-reactor = { path = "../evorule-reactor", version = "0.6.1" }
+evorule-tcb = { path = "../evorule-tcb", version = "0.6.1" }
 serde_json = "1"
 
 # wasm-bindgen only needed for the wasm32 entry; pure run_core has no async runtime.
