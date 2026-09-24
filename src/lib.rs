@@ -153,6 +153,25 @@ pub fn run_demo(rules_json: &str, command_json: &str) -> String {
     run_core(rules_json, command_json)
 }
 
+/// Build identity of this demo artifact: the wasm-demo crate version plus the
+/// evorule-tcb version it was compiled against (extracted from Cargo.toml by
+/// build.rs). The live demo footer shows this, so engine staleness relative to
+/// the latest release is always self-evident.
+pub fn engine_version() -> String {
+    format!(
+        "evorule-wasm-demo {} / TCB v{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("EVORULE_TCB_DEP_VERSION")
+    )
+}
+
+/// wasm-bindgen export of [`engine_version`] (wasm32 only, same JS name).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = engine_version)]
+pub fn engine_version_js() -> String {
+    engine_version()
+}
+
 // ============================================================================
 // Stage1 M1: stateful EvoRuleEngine (wasm32-only wasm-bindgen API).
 // ============================================================================
@@ -657,4 +676,22 @@ pub fn bench_audit(n: usize) -> String {
     let count = auditor.audit_new();
     let ok = auditor.verify();
     format!("{}:{}", count, ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::engine_version;
+
+    /// engine_version() must report the TCB dependency version extracted by
+    /// build.rs — this is the string shown in the live demo footer.
+    #[test]
+    fn engine_version_reports_tcb() {
+        let v = engine_version();
+        assert!(
+            v.starts_with("evorule-wasm-demo 0.1.0 / TCB v"),
+            "unexpected engine_version format: {v}"
+        );
+        // Must not leak the raw env placeholder if build.rs failed to run.
+        assert!(!v.contains("EVORULE_TCB_DEP_VERSION"), "build.rs did not run");
+    }
 }

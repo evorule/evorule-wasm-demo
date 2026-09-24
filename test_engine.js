@@ -93,7 +93,7 @@ async function main() {
   fin.free();
 
   // ---------- Medical rules ----------
-  console.log('\n--- [2] MEDICAL: 特殊使用级抗菌药门诊处方 ---');
+  console.log('\n--- [2] MEDICAL: special-tier antibiotic outpatient prescription ---');
   const medRules = JSON.parse(
     readFileSync(path.join(RULES_DIR, '21_medical_rules.json'), 'utf8')
   );
@@ -119,7 +119,7 @@ async function main() {
   med.free();
 
   // ---------- 等保 (DJBH) rules ----------
-  console.log('\n--- [3] 等保: 非管理员请求管理员权限 ---');
+  console.log('\n--- [3] MLPS (DJBH): non-admin requesting admin permission ---');
   const djRules = JSON.parse(
     readFileSync(path.join(RULES_DIR, '22_djbh_rules.json'), 'utf8')
   );

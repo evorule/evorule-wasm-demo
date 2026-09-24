@@ -1,5 +1,9 @@
-﻿// SPDX-License-Identifier: AGPL-3.0-or-later
-// bench_node_sync.js 鈥?WASM 渚ф€ц兘鍩哄噯(Node, initSync 鍚屾鍒濆鍖?銆?// 鍙傛暟涓?examples/bench_native.rs 瀹屽叏涓€鑷?渚夸簬妯悜瀵规瘮銆?'use strict';
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// bench_node_sync.js - WASM-side performance baseline (Node, initSync init).
+// Same parameters as examples/bench_native.rs, for cross-target comparison.
+// (Header rewritten 2026-09-24: original UTF-8 comment was double-encoded
+//  into mojibake and swallowed the 'use strict' line.)
+'use strict';
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
