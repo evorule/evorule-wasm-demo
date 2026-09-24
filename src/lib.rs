@@ -692,6 +692,9 @@ mod tests {
             "unexpected engine_version format: {v}"
         );
         // Must not leak the raw env placeholder if build.rs failed to run.
-        assert!(!v.contains("EVORULE_TCB_DEP_VERSION"), "build.rs did not run");
+        assert!(
+            !v.contains("EVORULE_TCB_DEP_VERSION"),
+            "build.rs did not run"
+        );
     }
 }
