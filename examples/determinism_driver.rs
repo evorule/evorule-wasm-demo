@@ -102,11 +102,7 @@ impl Engine {
 
                 let trace_hits: Vec<TraceHit> = rule_hits
                     .iter()
-                    .map(|h| TraceHit {
-                        index: h.index as u64,
-                        instr_type: h.instr_type.clone(),
-                        hit: h.hit,
-                    })
+                    .map(TraceHit::from_rule_hit)
                     .collect();
                 let trace_id = self.next_id();
                 self.facts_log

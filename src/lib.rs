@@ -108,12 +108,8 @@ pub fn run_core(rules_json: &str, command_json: &str) -> String {
         })
         .expect("append StateTransition");
     let trace_hits: Vec<TraceHit> = rule_hits
-        .into_iter()
-        .map(|h| TraceHit {
-            index: h.index as u64,
-            instr_type: h.instr_type,
-            hit: h.hit,
-        })
+        .iter()
+        .map(TraceHit::from_rule_hit)
         .collect();
     facts_log
         .append(Fact::TransitionTrace {
@@ -457,11 +453,7 @@ impl EvoRuleEngine {
 
                 let trace_hits: Vec<TraceHit> = rule_hits
                     .iter()
-                    .map(|h| TraceHit {
-                        index: h.index as u64,
-                        instr_type: h.instr_type.clone(),
-                        hit: h.hit,
-                    })
+                    .map(TraceHit::from_rule_hit)
                     .collect();
                 let trace_id = self.next_id();
                 self.facts_log
