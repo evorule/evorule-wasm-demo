@@ -107,10 +107,7 @@ pub fn run_core(rules_json: &str, command_json: &str) -> String {
             new_queue: new_queue.clone(),
         })
         .expect("append StateTransition");
-    let trace_hits: Vec<TraceHit> = rule_hits
-        .iter()
-        .map(TraceHit::from_rule_hit)
-        .collect();
+    let trace_hits: Vec<TraceHit> = rule_hits.iter().map(TraceHit::from_rule_hit).collect();
     facts_log
         .append(Fact::TransitionTrace {
             id: FactId(3),
@@ -451,10 +448,8 @@ impl EvoRuleEngine {
                         wasm_bindgen::JsValue::from_str(&format!("append StateTransition: {e}"))
                     })?;
 
-                let trace_hits: Vec<TraceHit> = rule_hits
-                    .iter()
-                    .map(TraceHit::from_rule_hit)
-                    .collect();
+                let trace_hits: Vec<TraceHit> =
+                    rule_hits.iter().map(TraceHit::from_rule_hit).collect();
                 let trace_id = self.next_id();
                 self.facts_log
                     .append(Fact::TransitionTrace {

@@ -100,10 +100,8 @@ impl Engine {
                     })
                     .unwrap();
 
-                let trace_hits: Vec<TraceHit> = rule_hits
-                    .iter()
-                    .map(TraceHit::from_rule_hit)
-                    .collect();
+                let trace_hits: Vec<TraceHit> =
+                    rule_hits.iter().map(TraceHit::from_rule_hit).collect();
                 let trace_id = self.next_id();
                 self.facts_log
                     .append(Fact::TransitionTrace {
