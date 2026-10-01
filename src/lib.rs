@@ -321,7 +321,7 @@ impl EvoRuleEngine {
     /// intact — only the working view moves. Returns the restored state JSON.
     pub fn rewind(&mut self, version: f64) -> Result<String, wasm_bindgen::JsValue> {
         let target = version as u64;
-        let facts = self.facts_log.read_from(0);
+        let facts = self.facts_log.read_from(0).unwrap();
         let mut v: u64 = 0;
         let mut payload = JsonValue::empty_object();
         let mut queue: Vec<JsonValue> = Vec::new();
