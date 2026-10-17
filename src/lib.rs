@@ -30,7 +30,13 @@
 //! **replays** `execute_transition` from the original inputs (D11 contract).
 
 use evorule_governance::Auditor;
-use evorule_reactor::{serde_to_tcb, tcb_to_serde, Fact, FactId, FactsLog, TraceHit};
+use evorule_reactor::{
+    chain_step, content_hash, serde_to_tcb, tcb_to_serde, Fact, FactId, FactsLog, TraceHit,
+};
+// Export path (wasm32-only EvoRuleEngine impl) additionally needs the stable
+// serializer; natively it would be an unused import under -D warnings.
+#[cfg(target_arch = "wasm32")]
+use evorule_reactor::fact_to_stable_json;
 use evorule_tcb::{execute_transition, JsonValue, TransitionResult};
 
 // `IoType` and `RuleHit` are referenced **only** from inside the
@@ -146,6 +152,83 @@ pub fn run_core(rules_json: &str, command_json: &str) -> String {
 #[wasm_bindgen]
 pub fn run_demo(rules_json: &str, command_json: &str) -> String {
     run_core(rules_json, command_json)
+}
+
+/// Offline audit-chain verification over [`EvoRuleEngine::export_chain`]
+/// output (pure function; also the wasm32 export `verify_chain_json`).
+///
+/// Recomputes, per entry, (a) the content hash over `stable_json` and (b) the
+/// chain link from the previous entry — the same math the production
+/// audit/export + CLI verify_chain path performs over hash-chain metadata.
+/// Returns a report: per-index `content_ok` / `link_ok`, the first broken
+/// index (if any) and the recomputed chain tip.
+pub fn verify_exported_chain_impl(entries_json: &str) -> Result<serde_json::Value, String> {
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(entries_json).map_err(|e| format!("parse entries: {e}"))?;
+
+    const GENESIS: &str = "genesis";
+    let mut prev: String = GENESIS.to_string();
+    let mut first_broken: Option<usize> = None;
+    let mut report: Vec<serde_json::Value> = Vec::with_capacity(entries.len());
+
+    for (i, e) in entries.iter().enumerate() {
+        let field = |name: &str| {
+            e.get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| format!("entry {i}: missing string field '{name}'"))
+        };
+        let stable_json = field("stable_json")?;
+        let content_hash_recorded = field("content_hash")?;
+        let entry_prev = field("prev_hash")?;
+
+        // (a) content integrity: the production hash function over the exact
+        // text that was hashed at append time.
+        let stable_value: serde_json::Value = serde_json::from_str(&stable_json)
+            .map_err(|e| format!("entry {i}: parse stable_json: {e}"))?;
+        let recomputed_content = content_hash(&serde_to_tcb(&stable_value))
+            .map_err(|e| format!("entry {i}: content_hash: {e}"))?;
+        let content_ok = recomputed_content == content_hash_recorded;
+
+        // (b) link integrity: this entry must hang off the tip recomputed
+        // from the PREVIOUS entry's *recomputed-from-text* content hash —
+        // not its recorded one. Data-derived linking is what makes tampering
+        // cascade: editing entry i's text breaks i's content hash and
+        // detaches every later link (an attacker must re-chain the entire
+        // tail to restore consistency — the demo narrative's "cost").
+        let link_ok = entry_prev == prev;
+        let recomputed_tip = chain_step(&entry_prev, &recomputed_content);
+
+        if !(content_ok && link_ok) && first_broken.is_none() {
+            first_broken = Some(i);
+        }
+        report.push(serde_json::json!({
+            "index": i,
+            "fact_id": e.get("fact_id").cloned().unwrap_or(serde_json::Value::Null),
+            "fact_type": e.get("fact_type").cloned().unwrap_or(serde_json::Value::Null),
+            "content_ok": content_ok,
+            "link_ok": link_ok,
+        }));
+        prev = recomputed_tip;
+    }
+
+    Ok(serde_json::json!({
+        "verified": first_broken.is_none() && !report.is_empty(),
+        "entry_count": report.len(),
+        "first_broken_index": first_broken,
+        "chain_tip": prev,
+        "entries": report,
+    }))
+}
+
+/// wasm-bindgen export of the offline verifier (same JSON-in/JSON-out
+/// contract as the native [`verify_exported_chain_impl`]).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = verify_chain_json)]
+pub fn verify_chain_json_js(entries_json: &str) -> Result<String, wasm_bindgen::JsValue> {
+    verify_exported_chain_impl(entries_json)
+        .map(|v| v.to_string())
+        .map_err(wasm_bindgen::JsValue::from_str)
 }
 
 /// Build identity of this demo artifact: the wasm-demo crate version plus the
@@ -268,6 +351,22 @@ impl EvoRuleEngine {
             .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("parse io_result: {e}")))?;
         let io_result_tcb = serde_to_tcb(&io_result);
 
+        // IoResponse fact lands on the chain BEFORE the replay commit: the
+        // response text (the external executor's full output — for LLM calls,
+        // the model reply itself) is a first-class audit fact, cause-linked
+        // to its IoRequest. Mirrors what the async reactor emits for
+        // io_response submission in the real engine.
+        let resp_id = self.next_id();
+        self.facts_log
+            .append(Fact::IoResponse {
+                id: resp_id,
+                request_id: io_id.unwrap_or(FactId(0)),
+                result: io_result_tcb.clone(),
+                error: None,
+            })
+            .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("append IoResponse: {e}")))?;
+        self.auditor.audit_new();
+
         let mut replay_payload = self.view_payload.clone();
         let map = replay_payload
             .as_object_mut()
@@ -307,6 +406,36 @@ impl EvoRuleEngine {
                     "content_hash": e.content_hash,
                     "prev_hash": e.prev_hash,
                     "cause": e.cause.map(|c| c.0),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(entries).to_string()
+    }
+
+    /// Offline verification export: per-fact chain metadata PLUS the exact
+    /// stable-JSON text that was hashed (the verifier's input). Consumers may
+    /// edit `stable_json` freely and re-run [`verify_exported_chain`] — a
+    /// tampered byte breaks the content hash at that entry and cascades to
+    /// every later link. This is what the live demo's tamper view is built on.
+    pub fn export_chain(&self) -> String {
+        let facts = self.facts_log.read_from(0).unwrap_or_default();
+        let entries: Vec<serde_json::Value> = self
+            .auditor
+            .entries()
+            .iter()
+            .zip(facts.iter())
+            .map(|(e, f)| {
+                let stable = fact_to_stable_json(f)
+                    .ok()
+                    .and_then(|v| serde_json::to_string(&v).ok());
+                serde_json::json!({
+                    "fact_id": e.fact_id.0,
+                    "fact_type": e.fact_type,
+                    "logical_time": e.logical_time,
+                    "cause": e.cause.map(|c| c.0),
+                    "prev_hash": e.prev_hash,
+                    "content_hash": e.content_hash,
+                    "stable_json": stable,
                 })
             })
             .collect();
@@ -669,7 +798,7 @@ pub fn bench_audit(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{engine_version, CONSTITUTION};
+    use super::{engine_version, verify_exported_chain_impl, CONSTITUTION};
 
     /// engine_version() must report the TCB dependency tag extracted by
     /// build.rs — this is the string shown in the live demo footer.
@@ -699,6 +828,107 @@ mod tests {
         assert_eq!(
             actual, EXPECTED,
             "constitution/core_eval.json drifted from the pinned tag's copy"
+        );
+    }
+
+    /// Offline verifier, honest chain: recomputed content hashes and links
+    /// all check out, chain tip reported.
+    #[test]
+    fn verify_exported_chain_accepts_honest_chain() {
+        use evorule_reactor::{chain_step, content_hash, serde_to_tcb};
+
+        let mk_entry = |prev: &str, payload: serde_json::Value| {
+            let stable = serde_json::json!({ "type": "Command", "instruction": payload });
+            let content = content_hash(&serde_to_tcb(&stable)).unwrap();
+            let prev_hash = chain_step(prev, &content);
+            serde_json::json!({
+                "fact_id": 1, "fact_type": "Command",
+                "prev_hash": prev, "content_hash": content,
+                "stable_json": serde_json::to_string(&stable).unwrap(),
+                "_prev_hash": prev_hash,
+            })
+        };
+
+        let mut e0 = mk_entry("genesis", serde_json::json!({"n": 0}));
+        let mut e1 = mk_entry(
+            e0["_prev_hash"].as_str().unwrap(),
+            serde_json::json!({"n": 1}),
+        );
+        let mut e2 = mk_entry(
+            e1["_prev_hash"].as_str().unwrap(),
+            serde_json::json!({"n": 2}),
+        );
+        for e in [&mut e0, &mut e1, &mut e2] {
+            e.as_object_mut().unwrap().remove("_prev_hash");
+        }
+        let chain = serde_json::Value::Array(vec![e0, e1, e2]).to_string();
+
+        let report: serde_json::Value =
+            verify_exported_chain_impl(&chain).expect("verify honest chain");
+        assert_eq!(report["verified"], serde_json::Value::Bool(true));
+        assert_eq!(report["first_broken_index"], serde_json::Value::Null);
+        assert_eq!(report["entry_count"], 3);
+    }
+
+    /// Offline verifier, tampered chain: editing one entry's hashed text must
+    /// break that entry's content hash AND cascade to every later link.
+    #[test]
+    fn verify_exported_chain_detects_tamper_with_cascade() {
+        use evorule_reactor::{chain_step, content_hash, serde_to_tcb};
+
+        let mk_entry = |prev: &str, payload: serde_json::Value| {
+            let stable = serde_json::json!({ "type": "Command", "instruction": payload });
+            let content = content_hash(&serde_to_tcb(&stable)).unwrap();
+            let prev_hash = chain_step(prev, &content);
+            serde_json::json!({
+                "fact_id": 1, "fact_type": "Command",
+                "prev_hash": prev, "content_hash": content,
+                "stable_json": serde_json::to_string(&stable).unwrap(),
+                "_prev_hash": prev_hash,
+            })
+        };
+
+        let mut e0 = mk_entry("genesis", serde_json::json!({"n": 0}));
+        let mut e1 = mk_entry(
+            e0["_prev_hash"].as_str().unwrap(),
+            serde_json::json!({"n": 1}),
+        );
+        let mut e2 = mk_entry(
+            e1["_prev_hash"].as_str().unwrap(),
+            serde_json::json!({"n": 2}),
+        );
+        for e in [&mut e0, &mut e1, &mut e2] {
+            e.as_object_mut().unwrap().remove("_prev_hash");
+        }
+
+        // Tamper: one byte of entry 1's hashed text.
+        let tampered = e1["stable_json"]
+            .as_str()
+            .unwrap()
+            .replacen("\"n\":1", "\"n\":2", 1);
+        assert_ne!(
+            tampered,
+            e1["stable_json"].as_str().unwrap(),
+            "tamper must change bytes"
+        );
+        e1["stable_json"] = serde_json::Value::String(tampered);
+
+        let chain = serde_json::Value::Array(vec![e0, e1, e2]).to_string();
+        let report: serde_json::Value =
+            verify_exported_chain_impl(&chain).expect("verify tampered chain");
+
+        assert_eq!(report["verified"], serde_json::Value::Bool(false));
+        assert_eq!(
+            report["first_broken_index"], 1,
+            "break lands on the tampered entry"
+        );
+        assert_eq!(
+            report["entries"][1]["content_ok"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            report["entries"][2]["link_ok"],
+            serde_json::Value::Bool(false)
         );
     }
 }
