@@ -197,7 +197,7 @@ pub fn verify_exported_chain_impl(entries_json: &str) -> Result<serde_json::Valu
         // detaches every later link (an attacker must re-chain the entire
         // tail to restore consistency — the demo narrative's "cost").
         let link_ok = entry_prev == prev;
-        let recomputed_tip = chain_step(&entry_prev, &recomputed_content);
+        let recomputed_tip = chain_step(&prev, &recomputed_content);
 
         if !(content_ok && link_ok) && first_broken.is_none() {
             first_broken = Some(i);
@@ -228,7 +228,7 @@ pub fn verify_exported_chain_impl(entries_json: &str) -> Result<serde_json::Valu
 pub fn verify_chain_json_js(entries_json: &str) -> Result<String, wasm_bindgen::JsValue> {
     verify_exported_chain_impl(entries_json)
         .map(|v| v.to_string())
-        .map_err(wasm_bindgen::JsValue::from_str)
+        .map_err(|e| wasm_bindgen::JsValue::from_str(&e))
 }
 
 /// Build identity of this demo artifact: the wasm-demo crate version plus the
