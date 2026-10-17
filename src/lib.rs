@@ -31,23 +31,16 @@
 
 use evorule_governance::Auditor;
 use evorule_reactor::{
-    chain_step, content_hash, serde_to_tcb, tcb_to_serde, Fact, FactId, FactsLog, TraceHit,
+    chain_step, content_hash, fact_to_stable_json, serde_to_tcb, tcb_to_serde, Fact, FactId,
+    FactsLog, IoType, TraceHit,
 };
-// Export path (wasm32-only EvoRuleEngine impl) additionally needs the stable
-// serializer; natively it would be an unused import under -D warnings.
-#[cfg(target_arch = "wasm32")]
-use evorule_reactor::fact_to_stable_json;
 use evorule_tcb::{execute_transition, JsonValue, TransitionResult};
 
-// `IoType` and `RuleHit` are referenced **only** from inside the
-// `#[cfg(target_arch = "wasm32")]`-gated `EvoRuleEngine` impl blocks below
-// (`Fact::IoRequest { io_type: IoType::new(..) }` and the `|h: &RuleHit|`
-// closure annotation). On a native build that code is cfg'd out, so a
-// top-level `use` of these two names is genuinely unused and fails the
-// workspace lint stage under `-D warnings` (clippy: `unused_imports`).
-// Keep them behind the same cfg predicate as their only users.
-#[cfg(target_arch = "wasm32")]
-use evorule_reactor::IoType;
+// `RuleHit` is referenced only from inside the `#[cfg(target_arch =
+// "wasm32")]`-gated `EvoRuleEngine` impl blocks; natively it would be an
+// unused import under `-D warnings`, so it keeps the same cfg predicate as
+// its only user. `IoType` moved to the unconditional import above (the
+// native `LlmAuditSession` uses it too).
 #[cfg(target_arch = "wasm32")]
 use evorule_tcb::RuleHit;
 
@@ -241,6 +234,301 @@ pub fn engine_version() -> String {
         env!("CARGO_PKG_VERSION"),
         env!("EVORULE_TCB_DEP_VERSION")
     )
+}
+
+// ============================================================================
+// LLM audit session (paper's interactive appendix core): a call_external-
+// shaped scripted conversation recorded on the REAL audit mechanism.
+//
+// What is real here: the Fact variants, the append-only FactsLog, the BLAKE3
+// hash chain, the causal cause links, the transcript payload facts, and the
+// offline verifier. What is scripted: the conversation content itself (so the
+// demo is byte-reproducible; the page labels this explicitly).
+// ============================================================================
+
+/// Shared chain-export builder: per-fact chain metadata + the exact
+/// stable-JSON text that was hashed (offline verifier input). Used by both
+/// the rule engine and the LLM audit session.
+fn chain_export(facts_log: &FactsLog, auditor: &Auditor) -> String {
+    let facts = facts_log.read_from(0).unwrap_or_default();
+    let entries: Vec<serde_json::Value> = auditor
+        .entries()
+        .iter()
+        .zip(facts.iter())
+        .map(|(e, f)| {
+            let stable = fact_to_stable_json(f)
+                .ok()
+                .and_then(|v| serde_json::to_string(&v).ok());
+            serde_json::json!({
+                "fact_id": e.fact_id.0,
+                "fact_type": e.fact_type,
+                "logical_time": e.logical_time,
+                "cause": e.cause.map(|c| c.0),
+                "prev_hash": e.prev_hash,
+                "content_hash": e.content_hash,
+                "stable_json": stable,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(entries).to_string()
+}
+
+/// One scripted LLM call session on the real audit mechanism.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct LlmAuditSession {
+    /// Declared model name (recorded into every call_external command fact).
+    model: String,
+    facts_log: FactsLog,
+    auditor: Auditor,
+    next_fact_id: u64,
+    /// Messages already persisted as transcript payload facts.
+    persisted_messages: usize,
+    /// (io_request fact id, command fact id) awaiting a response.
+    pending: Option<FactId>,
+    /// Aggregated provider token truth across calls.
+    tokens_prompt: u64,
+    tokens_completion: u64,
+}
+
+impl LlmAuditSession {
+    /// Open a session for the declared model.
+    pub fn new(model: &str) -> Self {
+        let facts_log = FactsLog::new();
+        Self {
+            model: model.to_string(),
+            auditor: Auditor::new(facts_log.clone()),
+            facts_log,
+            next_fact_id: 1,
+            persisted_messages: 0,
+            pending: None,
+            tokens_prompt: 0,
+            tokens_completion: 0,
+        }
+    }
+
+    fn next_id(&mut self) -> FactId {
+        let id = FactId(self.next_fact_id);
+        self.next_fact_id += 1;
+        id
+    }
+
+    /// Begin one call_external call: persist any not-yet-on-chain messages as
+    /// transcript payload facts, then append the command fact (the exact
+    /// params sent to the model) and the IoRequest fact.
+    pub fn begin_call(&mut self, messages_json: &str) -> Result<serde_json::Value, String> {
+        if self.pending.is_some() {
+            return Err("begin_call: previous call still awaiting respond()".into());
+        }
+        let messages: Vec<serde_json::Value> =
+            serde_json::from_str(messages_json).map_err(|e| format!("parse messages: {e}"))?;
+        if messages.len() < self.persisted_messages {
+            return Err("begin_call: messages shorter than already-persisted transcript".into());
+        }
+
+        // Transcript payload facts (real-path shape `__memory__.{ns}.session_{sid}.messages.{idx}`).
+        for msg in &messages[self.persisted_messages..] {
+            let id = self.next_id();
+            let path = format!(
+                "__memory__.demo.session_1.messages.{}",
+                self.persisted_messages
+            );
+            self.facts_log
+                .append(Fact::PayloadUpdate {
+                    id,
+                    path,
+                    value: serde_to_tcb(msg),
+                })
+                .map_err(|e| format!("append transcript fact: {e}"))?;
+            self.persisted_messages += 1;
+        }
+        self.auditor.audit_new();
+
+        // call_external command fact: the exact request params.
+        let params = serde_json::json!({
+            "model": self.model,
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "stream": true,
+            "audit_purpose": "react",
+            "messages": messages,
+        });
+        let instruction = serde_json::json!({ "type": "call_external", "params": params });
+        let cmd_id = self.next_id();
+        self.facts_log
+            .append(Fact::Command {
+                id: cmd_id,
+                instruction: serde_to_tcb(&instruction),
+            })
+            .map_err(|e| format!("append command: {e}"))?;
+
+        let io_id = self.next_id();
+        self.facts_log
+            .append(Fact::IoRequest {
+                id: io_id,
+                cause: cmd_id,
+                io_type: IoType::new("call_external"),
+                params: serde_to_tcb(&params),
+            })
+            .map_err(|e| format!("append io_request: {e}"))?;
+        self.auditor.audit_new();
+
+        self.pending = Some(io_id);
+        Ok(serde_json::json!({
+            "command_fact_id": cmd_id.0,
+            "io_request_fact_id": io_id.0,
+            "messages_sent": messages.len(),
+        }))
+    }
+
+    /// Complete the pending call: append the IoResponse fact (the model's
+    /// full reply + provider token truth), persist the assistant message,
+    /// then seal with Stable. Returns the verify verdict and token usage.
+    pub fn respond(&mut self, response_json: &str) -> Result<serde_json::Value, String> {
+        let io_id = self
+            .pending
+            .take()
+            .ok_or_else(|| "respond: no pending call (begin_call first)".to_string())?;
+        let response: serde_json::Value =
+            serde_json::from_str(response_json).map_err(|e| format!("parse response: {e}"))?;
+
+        let result = serde_json::json!({
+            "content": response.get("content").cloned().unwrap_or(serde_json::Value::Null),
+            "tool_calls": response.get("tool_calls").cloned().unwrap_or(serde_json::Value::Null),
+            "finish_reason": response.get("finish_reason").cloned().unwrap_or(serde_json::Value::Null),
+            "token_usage": response.get("token_usage").cloned().unwrap_or(serde_json::Value::Null),
+        });
+
+        let id = self.next_id();
+        self.facts_log
+            .append(Fact::IoResponse {
+                id,
+                request_id: io_id,
+                result: serde_to_tcb(&result),
+                error: None,
+            })
+            .map_err(|e| format!("append io_response: {e}"))?;
+
+        // Assistant message lands on the transcript too (with tool_calls if present).
+        let assistant = serde_json::json!({
+            "role": "assistant",
+            "content": response.get("content").cloned().unwrap_or(serde_json::Value::Null),
+            "tool_calls": response.get("tool_calls").cloned().unwrap_or(serde_json::Value::Null),
+        });
+        let tid = self.next_id();
+        let path = format!(
+            "__memory__.demo.session_1.messages.{}",
+            self.persisted_messages
+        );
+        self.facts_log
+            .append(Fact::PayloadUpdate {
+                id: tid,
+                path,
+                value: serde_to_tcb(&assistant),
+            })
+            .map_err(|e| format!("append assistant fact: {e}"))?;
+        self.persisted_messages += 1;
+
+        let version = self.facts_log.version();
+        let sid = self.next_id();
+        self.facts_log
+            .append(Fact::Stable { id: sid, version })
+            .map_err(|e| format!("append stable: {e}"))?;
+        self.auditor.audit_new();
+
+        let verified = self.auditor.verify();
+        if let Some(usage) = response.get("token_usage") {
+            self.tokens_prompt += usage
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            self.tokens_completion += usage
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+        }
+        Ok(serde_json::json!({
+            "io_response_fact_id": id.0,
+            "stable_fact_id": sid.0,
+            "stable_version": version,
+            "verified": verified,
+            "session_tokens": {
+                "prompt": self.tokens_prompt,
+                "completion": self.tokens_completion,
+                "total": self.tokens_prompt + self.tokens_completion,
+            },
+        }))
+    }
+
+    /// Chain view (one metadata entry per fact).
+    pub fn audit_chain(&self) -> String {
+        let facts = self.facts_log.read_from(0).unwrap_or_default();
+        let entries: Vec<serde_json::Value> = self
+            .auditor
+            .entries()
+            .iter()
+            .zip(facts.iter())
+            .map(|(e, f)| {
+                serde_json::json!({
+                    "fact_id": e.fact_id.0,
+                    "fact_type": e.fact_type,
+                    "logical_time": e.logical_time,
+                    "cause": e.cause.map(|c| c.0),
+                    "prev_hash": e.prev_hash,
+                    "content_hash": e.content_hash,
+                    "fact_json": tcb_to_serde(&f.to_json()),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(entries).to_string()
+    }
+
+    /// Offline verification export (verifier input; tamper-friendly).
+    pub fn export_chain(&self) -> String {
+        chain_export(&self.facts_log, &self.auditor)
+    }
+
+    /// Engine-side end-to-end chain verification.
+    pub fn verify(&self) -> bool {
+        self.auditor.verify()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl LlmAuditSession {
+    #[wasm_bindgen(constructor)]
+    pub fn with_model(model: &str) -> LlmAuditSession {
+        LlmAuditSession::new(model)
+    }
+
+    #[wasm_bindgen(js_name = begin_call)]
+    pub fn begin_call_js(&mut self, messages_json: &str) -> Result<String, wasm_bindgen::JsValue> {
+        LlmAuditSession::begin_call(self, messages_json)
+            .map(|v| v.to_string())
+            .map_err(|e| wasm_bindgen::JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = respond)]
+    pub fn respond_js(&mut self, response_json: &str) -> Result<String, wasm_bindgen::JsValue> {
+        LlmAuditSession::respond(self, response_json)
+            .map(|v| v.to_string())
+            .map_err(|e| wasm_bindgen::JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = audit_chain)]
+    pub fn audit_chain_js(&self) -> String {
+        LlmAuditSession::audit_chain(self)
+    }
+
+    #[wasm_bindgen(js_name = export_chain)]
+    pub fn export_chain_js(&self) -> String {
+        LlmAuditSession::export_chain(self)
+    }
+
+    #[wasm_bindgen(js_name = verify)]
+    pub fn verify_js(&self) -> bool {
+        LlmAuditSession::verify(self)
+    }
 }
 
 /// wasm-bindgen export of [`engine_version`] (wasm32 only, same JS name).
@@ -929,6 +1217,170 @@ mod tests {
         assert_eq!(
             report["entries"][2]["link_ok"],
             serde_json::Value::Bool(false)
+        );
+    }
+
+    // ----- LlmAuditSession: scripted call_external conversation on the real
+    // audit mechanism (paper appendix core) -----
+
+    const CALL_MESSAGES: &str = r#"[{"role":"system","content":"You are a demo assistant."},
+            {"role":"user","content":"读取 foo.txt 并总结。"}]"#;
+
+    /// One scripted call: fact stream shape, causal linkage, token truth in
+    /// the IoResponse fact, transcript persistence, engine verify verdict.
+    #[test]
+    fn llm_session_fact_stream_shape_and_tokens() {
+        use super::LlmAuditSession;
+
+        let mut s = LlmAuditSession::new("audit-probe-mock");
+        s.begin_call(CALL_MESSAGES).expect("begin_call");
+        let respond = s
+            .respond(
+                r#"{"content":"MOCK-REPLY","finish_reason":"stop",
+                    "token_usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+            )
+            .expect("respond");
+
+        assert_eq!(respond["verified"], serde_json::Value::Bool(true));
+        assert_eq!(respond["session_tokens"]["total"], 17);
+
+        let chain: Vec<serde_json::Value> = serde_json::from_str(&s.audit_chain()).unwrap();
+        let types: Vec<&str> = chain
+            .iter()
+            .map(|e| e["fact_type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "PayloadUpdate",
+                "PayloadUpdate",
+                "Command",
+                "IoRequest",
+                "IoResponse",
+                "PayloadUpdate",
+                "Stable"
+            ],
+            "unexpected fact stream: {types:?}"
+        );
+
+        // Causal link: IoResponse hangs off its IoRequest.
+        let io_req_idx = types.iter().position(|t| *t == "IoRequest").unwrap();
+        let io_resp_idx = types.iter().position(|t| *t == "IoResponse").unwrap();
+        assert_eq!(
+            chain[io_resp_idx]["cause"], chain[io_req_idx]["fact_id"],
+            "IoResponse must be cause-linked to its IoRequest"
+        );
+
+        // Token truth recorded inside the IoResponse fact content.
+        let export: Vec<serde_json::Value> = serde_json::from_str(&s.export_chain()).unwrap();
+        assert!(
+            export[io_resp_idx]["stable_json"]
+                .as_str()
+                .unwrap()
+                .contains("\"total_tokens\":17"),
+            "token usage must be inside the hashed IoResponse content"
+        );
+
+        // Transcript paths follow the real payload-fact shape.
+        let transcript_paths: Vec<&str> = chain
+            .iter()
+            .filter(|e| e["fact_type"] == "PayloadUpdate")
+            .filter_map(|e| e["fact_json"]["path"].as_str())
+            .collect();
+        assert!(
+            transcript_paths
+                .iter()
+                .all(|p| p.starts_with("__memory__.demo.session_1.messages.")),
+            "transcript paths must follow the real payload-fact shape: {transcript_paths:?}"
+        );
+        assert!(s.verify());
+    }
+
+    /// Two-call scripted run (tool round + final answer): token aggregation
+    /// across calls, and byte-identical determinism for identical scripts.
+    #[test]
+    fn llm_session_two_calls_deterministic() {
+        use super::LlmAuditSession;
+
+        let run_script = |s: &mut LlmAuditSession| {
+            s.begin_call(CALL_MESSAGES).unwrap();
+            s.respond(
+                r#"{"content":"","tool_calls":[{"tool_name":"file_read","args":{"path":"foo.txt"}}],
+                    "finish_reason":"tool_call",
+                    "token_usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+            )
+            .unwrap();
+            let history = format!(
+                "{}, {{\"role\":\"tool\",\"tool_name\":\"file_read\",\"content\":\"hello audit chain\"}}",
+                CALL_MESSAGES.trim_end_matches(']')
+            );
+            s.begin_call(&format!("{history}]")).unwrap();
+            s.respond(
+                r#"{"content":"FILE-READ-DONE","finish_reason":"stop",
+                    "token_usage":{"prompt_tokens":40,"completion_tokens":7,"total_tokens":47}}"#,
+            )
+            .unwrap()
+        };
+
+        let mut s = LlmAuditSession::new("audit-probe-mock");
+        let respond_report = run_script(&mut s);
+        assert_eq!(
+            respond_report["session_tokens"]["prompt"], 52,
+            "aggregated prompt tokens"
+        );
+        assert_eq!(
+            respond_report["session_tokens"]["completion"], 12,
+            "aggregated completion tokens"
+        );
+        assert_eq!(respond_report["verified"], serde_json::Value::Bool(true));
+
+        let a = {
+            let mut s = LlmAuditSession::new("audit-probe-mock");
+            run_script(&mut s);
+            s.export_chain()
+        };
+        let b = {
+            let mut s = LlmAuditSession::new("audit-probe-mock");
+            run_script(&mut s);
+            s.export_chain()
+        };
+        assert_eq!(a, b, "identical scripts must produce byte-identical chains");
+    }
+
+    /// Tampering the session export (edit the model reply inside the hashed
+    /// IoResponse text) breaks that entry and cascades to the tail.
+    #[test]
+    fn llm_session_tamper_cascades() {
+        use super::{verify_exported_chain_impl, LlmAuditSession};
+
+        let mut s = LlmAuditSession::new("audit-probe-mock");
+        s.begin_call(CALL_MESSAGES).unwrap();
+        s.respond(
+            r#"{"content":"MOCK-REPLY","finish_reason":"stop",
+                "token_usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}"#,
+        )
+        .unwrap();
+
+        let mut exported: Vec<serde_json::Value> = serde_json::from_str(&s.export_chain()).unwrap();
+        let resp_idx = exported
+            .iter()
+            .position(|e| e["fact_type"] == "IoResponse")
+            .unwrap();
+        let tampered = exported[resp_idx]["stable_json"]
+            .as_str()
+            .unwrap()
+            .replace("MOCK-REPLY", "TAMPERED-REPLY");
+        exported[resp_idx]["stable_json"] = serde_json::Value::String(tampered);
+
+        let report: serde_json::Value =
+            verify_exported_chain_impl(&serde_json::Value::Array(exported).to_string()).unwrap();
+        assert_eq!(report["verified"], serde_json::Value::Bool(false));
+        assert_eq!(report["first_broken_index"], resp_idx);
+        let last = report["entries"].as_array().unwrap().len() - 1;
+        assert_eq!(
+            report["entries"][last]["link_ok"],
+            serde_json::Value::Bool(false),
+            "cascade must reach the tail entry"
         );
     }
 }

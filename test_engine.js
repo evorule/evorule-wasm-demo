@@ -27,7 +27,7 @@ async function main() {
   const mod = await import(pathToFileURL(path.join(PKG_DIR, 'evorule_wasm_demo.js')).href);
   const wasmBytes = readFileSync(path.join(PKG_DIR, 'evorule_wasm_demo_bg.wasm'));
   mod.initSync({ module: wasmBytes });
-  const { EvoRuleEngine } = mod;
+  const { EvoRuleEngine, LlmAuditSession, verify_chain_json } = mod;
 
   console.log('=== EvoRuleEngine stateful API smoke test ===\n');
 
@@ -140,6 +140,87 @@ async function main() {
   check('djbh audit chain non-empty', Array.isArray(djChain) && djChain.length > 0,
     'entries=' + djChain.length);
   dj.free();
+
+  // ---- LLM audit appendix: io-shaped flow + LlmAuditSession on the real
+  // audit mechanism (IoResponse on chain, offline verifier, tamper cascade).
+  const ioRules = JSON.stringify([
+    { type: 'branch', params: {
+        domain: { type: 'all', inner: [
+          { type: 'instruction', instruction_type: 'call_llm' },
+          { type: 'not', inner: { type: 'exists', path: '__exec__.payload.__io_result__' } } ] },
+        on_true: [ { type: 'io_request', params: {
+          io_type: 'call_external', service_name: 'echo_svc',
+          args: '__exec__.instruction.params.args' } } ],
+        on_false: [] } },
+    { type: 'branch', params: {
+        domain: { type: 'all', inner: [
+          { type: 'instruction', instruction_type: 'call_llm' },
+          { type: 'exists', path: '__exec__.payload.__io_result__' } ] },
+        on_true: [ { type: 'set', params: {
+          attr: 'data.last_reply', operation: 'set',
+          value: '__exec__.payload.__io_result__.content' } } ],
+        on_false: [] } },
+  ]);
+  const ie = new EvoRuleEngine();
+  ie.load_rules(ioRules);
+  const ir1 = JSON.parse(ie.execute_instruction(JSON.stringify({
+    type: 'call_llm', params: { args: { messages: [{ role: 'user', content: 'hello' }] } } })));
+  check('io flow pauses with io_required', ir1.type === 'io_required', 'type=' + ir1.type);
+  ie.resolve_io(JSON.stringify({ content: 'MOCK-LLM-REPLY', finish_reason: 'stop',
+    token_usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } }));
+  const ieChain = JSON.parse(ie.get_audit_chain());
+  const ieTypes = ieChain.map((c) => c.fact_type);
+  check('io flow IoResponse fact on chain', ieTypes.includes('IoResponse'),
+    'types=' + ieTypes.join(','));
+  const ieVerifyHonest = JSON.parse(verify_chain_json(ie.export_chain()));
+  check('io flow exported chain verifies honest', ieVerifyHonest.verified === true,
+    'first_broken=' + ieVerifyHonest.first_broken_index);
+  const ieExport = JSON.parse(ie.export_chain());
+  ieExport[0].stable_json = ieExport[0].stable_json.replace('hello', 'HELLO-TAMPERED');
+  const ieVerifyTampered = JSON.parse(verify_chain_json(JSON.stringify(ieExport)));
+  check('io flow tamper detected', ieVerifyTampered.verified === false
+    && ieVerifyTampered.first_broken_index === 0,
+    'first_broken=' + ieVerifyTampered.first_broken_index);
+  const ieTail = ieVerifyTampered.entries[ieVerifyTampered.entries.length - 1];
+  check('io flow tamper cascades to tail', ieTail.link_ok === false,
+    'tail.link_ok=' + ieTail.link_ok);
+  ie.free();
+
+  const MSGS = JSON.stringify([
+    { role: 'system', content: 'You are a demo assistant.' },
+    { role: 'user', content: '读取 foo.txt 并总结。' },
+  ]);
+  const sess = new LlmAuditSession('audit-probe-mock');
+  sess.begin_call(MSGS);
+  sess.respond(JSON.stringify({ content: '', finish_reason: 'tool_call',
+    tool_calls: [{ tool_name: 'file_read', args: { path: 'foo.txt' } }],
+    token_usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } }));
+  const MSGS2 = MSGS.slice(0, -1)
+    + ',{"role":"tool","tool_name":"file_read","content":"hello audit chain"}]';
+  sess.begin_call(MSGS2);
+  const sessFinal = JSON.parse(sess.respond(JSON.stringify({
+    content: 'FILE-READ-DONE', finish_reason: 'stop',
+    token_usage: { prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 } })));
+  check('llm session tokens aggregate across calls',
+    sessFinal.session_tokens.prompt === 52 && sessFinal.session_tokens.completion === 12,
+    JSON.stringify(sessFinal.session_tokens));
+  check('llm session verified', sessFinal.verified === true);
+  const sessChain = JSON.parse(sess.audit_chain());
+  const sessTypes = sessChain.map((c) => c.fact_type);
+  check('llm session IoResponse on chain', sessTypes.includes('IoResponse'),
+    'types=' + sessTypes.join(','));
+  const sessRespIdx = sessTypes.lastIndexOf('IoResponse');
+  const sessExport = JSON.parse(sess.export_chain());
+  sessExport[sessRespIdx].stable_json =
+    sessExport[sessRespIdx].stable_json.replace('FILE-READ-DONE', 'TAMPERED');
+  const sessVerify = JSON.parse(verify_chain_json(JSON.stringify(sessExport)));
+  check('llm session tamper detected at the edited fact',
+    sessVerify.verified === false && sessVerify.first_broken_index === sessRespIdx,
+    'first_broken=' + sessVerify.first_broken_index + ' expected=' + sessRespIdx);
+  const sessTail = sessVerify.entries[sessVerify.entries.length - 1];
+  check('llm session tamper cascades to tail', sessTail.link_ok === false,
+    'tail.link_ok=' + sessTail.link_ok);
+  sess.free();
 
   console.log('\n=== ' + (failures === 0 ? 'ALL TESTS PASSED' : failures + ' TEST(S) FAILED') + ' ===');
   process.exit(failures === 0 ? 0 : 1);
