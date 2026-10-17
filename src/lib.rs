@@ -229,8 +229,9 @@ pub fn verify_chain_json_js(entries_json: &str) -> Result<String, wasm_bindgen::
 /// build.rs). The live demo footer shows this, so engine staleness relative to
 /// the latest release is always self-evident.
 pub fn engine_version() -> String {
+    // The pin tag already carries its leading "v" (e.g. "v0.8.5").
     format!(
-        "evorule-wasm-demo {} / TCB v{}",
+        "evorule-wasm-demo {} / TCB {}",
         env!("CARGO_PKG_VERSION"),
         env!("EVORULE_TCB_DEP_VERSION")
     )
