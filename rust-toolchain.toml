@@ -1,0 +1,6 @@
+# Rust toolchain 锁定（与内核仓同版：1.98.1 实测全绿；1.97.x 对
+# evorule-reactor 存在稳定触发的 ICE，详见内核仓 rust-toolchain.toml 注记）
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

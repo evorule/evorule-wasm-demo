@@ -45,10 +45,12 @@ use evorule_reactor::IoType;
 #[cfg(target_arch = "wasm32")]
 use evorule_tcb::RuleHit;
 
-/// Embedded constitution (the same `evorule-tcb/core_eval.json` the TCB tests
-/// use). Compiled in via include_str! so it is byte-identical on native and
-/// wasm32 (no filesystem / no network at runtime).
-const CONSTITUTION: &str = include_str!("../../evorule-tcb/core_eval.json");
+/// Embedded constitution (vendored copy of `evorule-tcb/core_eval.json` at the
+/// git tag this crate pins in Cargo.toml; hash-asserted by
+/// `constitution::tests` so the copy cannot silently drift). Compiled in via
+/// include_str! so it is byte-identical on native and wasm32 (no filesystem /
+/// no network at runtime).
+const CONSTITUTION: &str = include_str!("../constitution/core_eval.json");
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -667,9 +669,9 @@ pub fn bench_audit(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::engine_version;
+    use super::{engine_version, CONSTITUTION};
 
-    /// engine_version() must report the TCB dependency version extracted by
+    /// engine_version() must report the TCB dependency tag extracted by
     /// build.rs — this is the string shown in the live demo footer.
     #[test]
     fn engine_version_reports_tcb() {
@@ -682,6 +684,21 @@ mod tests {
         assert!(
             !v.contains("EVORULE_TCB_DEP_VERSION"),
             "build.rs did not run"
+        );
+    }
+
+    /// Vendored constitution integrity: the embedded copy must match the
+    /// hash recorded at sync time. If this test fails, the copy drifted from
+    /// the pinned kernel tag — re-run scripts/sync-constitution.sh at the
+    /// tag bump and update the expected hash below.
+    #[test]
+    fn constitution_matches_synced_hash() {
+        const EXPECTED: &str =
+            "blake3:4b7d1e7850ec8ab1a34861d9493def752e27bdef798a72b9a4ea0f2537ad4960";
+        let actual = format!("blake3:{}", blake3::hash(CONSTITUTION.as_bytes()).to_hex());
+        assert_eq!(
+            actual, EXPECTED,
+            "constitution/core_eval.json drifted from the pinned tag's copy"
         );
     }
 }
