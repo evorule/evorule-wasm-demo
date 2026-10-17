@@ -29,6 +29,8 @@
 //! calls `resolve_io`, which injects `__io_result__` into the payload and
 //! **replays** `execute_transition` from the original inputs (D11 contract).
 
+mod wire_attestation;
+
 use evorule_governance::Auditor;
 use evorule_reactor::{
     chain_step, content_hash, fact_to_stable_json, serde_to_tcb, tcb_to_serde, Fact, FactId,
@@ -284,6 +286,8 @@ pub struct LlmAuditSession {
     next_fact_id: u64,
     /// Messages already persisted as transcript payload facts.
     persisted_messages: usize,
+    /// 字节级存证：会话内调用序（与真机 runner 同机制镜像）
+    wire_attest_seq: u64,
     /// (io_request fact id, command fact id) awaiting a response.
     pending: Option<FactId>,
     /// Aggregated provider token truth across calls.
@@ -301,6 +305,7 @@ impl LlmAuditSession {
             facts_log,
             next_fact_id: 1,
             persisted_messages: 0,
+            wire_attest_seq: 0,
             pending: None,
             tokens_prompt: 0,
             tokens_completion: 0,
@@ -373,10 +378,43 @@ impl LlmAuditSession {
             .map_err(|e| format!("append io_request: {e}"))?;
         self.auditor.audit_new();
 
+        // D6 镜像：发送内容存证 payload 事实（与真机 runner 同机制——
+        // blake3(canonical(model+temperature+messages)) 入链，tamper-evident）
+        let (wire_hash, wire_len) = crate::wire_attestation::compute(
+            &self.model,
+            0.3,
+            &serde_json::to_value(&messages).unwrap_or(serde_json::Value::Null),
+        );
+        let record = crate::wire_attestation::WireAttestation {
+            seq: self.wire_attest_seq,
+            model: self.model.clone(),
+            wire_hash: wire_hash.clone(),
+            wire_len,
+            messages_sent: messages.len(),
+            trimmed_count: 0,
+            purpose: "react".into(),
+            ts: 0, // 演示确定性：固定时间戳（真机侧为 Unix 秒）
+        };
+        let aid = self.next_id();
+        let apath = crate::wire_attestation::attestation_path(self.wire_attest_seq);
+        self.facts_log
+            .append(Fact::PayloadUpdate {
+                id: aid,
+                path: apath,
+                value: serde_to_tcb(
+                    &serde_json::to_value(&record).unwrap_or(serde_json::Value::Null),
+                ),
+            })
+            .map_err(|e| format!("append wire attestation: {e}"))?;
+        self.wire_attest_seq += 1;
+        self.auditor.audit_new();
+
         self.pending = Some(io_id);
         Ok(serde_json::json!({
             "command_fact_id": cmd_id.0,
             "io_request_fact_id": io_id.0,
+            "wire_attestation_fact_id": aid.0,
+            "wire_hash": wire_hash,
             "messages_sent": messages.len(),
         }))
     }
@@ -1257,12 +1295,14 @@ mod tests {
                 "PayloadUpdate",
                 "Command",
                 "IoRequest",
+                "PayloadUpdate",
                 "IoResponse",
                 "PayloadUpdate",
                 "Stable"
             ],
             "unexpected fact stream: {types:?}"
         );
+        // D6 镜像：存证 payload 事实夹在 IoRequest 与 IoResponse 之间
 
         // Causal link: IoResponse hangs off its IoRequest.
         let io_req_idx = types.iter().position(|t| *t == "IoRequest").unwrap();
@@ -1282,17 +1322,24 @@ mod tests {
             "token usage must be inside the hashed IoResponse content"
         );
 
-        // Transcript paths follow the real payload-fact shape.
-        let transcript_paths: Vec<&str> = chain
+        // Transcript paths follow the real payload-fact shape; the byte-level
+        // attestation payload fact (D6 mirror) rides the same chain separately.
+        let payload_paths: Vec<&str> = chain
             .iter()
             .filter(|e| e["fact_type"] == "PayloadUpdate")
             .filter_map(|e| e["fact_json"]["path"].as_str())
             .collect();
+        let transcript_paths: Vec<&str> = payload_paths
+            .iter()
+            .copied()
+            .filter(|p| p.starts_with("__memory__.demo.session_1.messages."))
+            .collect();
+        assert_eq!(transcript_paths.len(), 3, "system+user+assistant persisted");
         assert!(
-            transcript_paths
+            payload_paths
                 .iter()
-                .all(|p| p.starts_with("__memory__.demo.session_1.messages.")),
-            "transcript paths must follow the real payload-fact shape: {transcript_paths:?}"
+                .any(|p| p.starts_with("__audit__.wire_attestation.")),
+            "wire attestation fact must be on chain: {payload_paths:?}"
         );
         assert!(s.verify());
     }
