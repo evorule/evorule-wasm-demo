@@ -1,0 +1,18 @@
+# ci.yml — minimal CI for evorule-wasm-demo: ecosystem license gate only.
+# Calls the shared reusable workflow pinned to a root-repo commit (never @main).
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  license-gate:
+    name: license gate
+    permissions:
+      contents: read
+    uses: evorule/evorule/.github/workflows/license-gate.yml@9d0e4fdbb28cfd0db1051c9014149f198b290e6b
