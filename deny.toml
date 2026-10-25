@@ -70,7 +70,9 @@ ignore = ["RUSTSEC-2026-0110"]
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# 内核三件（governance/reactor/tcb）为 git tag pin 依赖（宪法内嵌副本同步纪律），
+# 无 semver 约束属正当形态——降为 warn 保留信号不阻塞
+wildcards = "warn"
 
 # ---------------------------------------------------------------------------
 # 来源: 仅允许 crates.io
