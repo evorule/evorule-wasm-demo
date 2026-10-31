@@ -1,65 +1,50 @@
 # evorule-wasm-demo
 
-真实 EvoRule 内核（TCB 纯函数 + FactsLog + BLAKE3 Auditor）编译到
-WebAssembly 的演示 crate——浏览器内全程运行，无服务器、无 tokio、无时钟。
-在线版：`https://evorule.github.io/wasm-demo/`（部署仓
-`evorule.github.io/wasm-demo/`，本仓构建产物经 `deploy.mjs` 同步过去）。
+The real evorule kernel (TCB pure functions + FactsLog + BLAKE3 auditor) compiled to WebAssembly: deterministic rule execution running entirely in the browser — no server, no tokio, no clock. Split out of the kernel repo's `evorule-wasm-demo/` subdirectory as a standalone repo on 2026-10-17 (full subdirectory history via `git subtree split`).
 
-> 2026-10-17 自内核仓 `evorule/evorule` 的 `evorule-wasm-demo/` 子目录
-> 移出为独立仓（`git subtree split` 抽取完整子目录历史，291 提交）。
+[![CI][badge-ci]][ci-link]
+[![License: AGPL-3.0-or-later][badge-license]][license-link]
 
-## API 面
+**License**: [AGPL-3.0-or-later](LICENSE) with [dual licensing](DUAL_LICENSE.md)
 
-- `run_core` / `run_demo`（wasm32 导出）：单次规则求值 + 事实落链 + 审计
-  链构建校验（无状态一次性）；
-- `EvoRuleEngine`（wasm32 有状态类）：`load_rules` → `execute_instruction`
-  → `io_required` 暂停 → `resolve_io`（注入 `__io_result__` 后从原始输入
-  重放提交，D11 契约）→ `get_audit_chain` / `verify_audit_chain` /
-  `rewind`（时间机器：工作视图回退，append-only 链不动）→ `reset`；
-- `engine_version`：构建身份自证（crate 版本 + 依赖 pin 的内核 tag），
-  在线 demo footer 展示。
+## Prerequisites
 
-## 构建
+Rust with the wasm32 target (wasm-pack), Node 22 for the determinism and engine test scripts.
+
+## Build
 
 ```bash
-# wasm 产物（web target，供页面 import）
+# wasm artifacts (web target, imported by the page)
 wasm-pack build --target web --out-dir pkg
 
-# native 侧（同 run_core 逻辑对照 + 确定性验证）
+# native side: the same run_core logic as a cross-check + determinism verification
 cargo build --examples
 cargo test
 
-# 确定性再生合并规则集 + 跑引擎测试面（node 22）
+# deterministic regeneration of the merged rule set + the engine test surface
 node determinism_run.js
 node test_engine.js
 ```
 
-## 依赖与宪法副本纪律
+## Run
 
-内核三件（evorule-tcb / evorule-reactor / evorule-governance）经 **git
-依赖锁定 tag**（见 Cargo.toml；gitee 主源，github 镜像待网络条件）。
-`constitution/core_eval.json` 是该 tag 版宪法的内嵌副本，与 pin 同版
-同步，漂移由 `constitution_matches_synced_hash` 测试 fail-visible。
-升版流程见 `constitution/README.md`。
-
-## 本地开发
-
-依赖本机同级内核检出时，向 `Cargo.toml` 临时追加（**不提交**）：
-
-```toml
-[patch."https://gitee.com/evorule/evorule.git"]
-evorule-tcb = { path = "../evorule/evorule-tcb" }
-evorule-reactor = { path = "../evorule/evorule-reactor" }
-evorule-governance = { path = "../evorule/evorule-governance" }
-```
-
-## 部署（在线 demo）
+Online demo: **https://evorule.github.io/wasm-demo/**
 
 ```bash
-# 1. 本仓重建产物
-wasm-pack build --target web --out-dir pkg
-# 2. 部署仓（evorule.github.io/wasm-demo/）内：
-node build-rules.js   # 再生规则数据
-node deploy.mjs       # 从本仓同步 pkg/
-# 3. commit + push，GitHub Pages 自动重部署
+wasm-pack build --target web --out-dir pkg    # 1. rebuild artifacts in this repo
+node build-rules.js && node deploy.mjs        # 2. in the Pages repo: regenerate rules, sync pkg/
+git commit && git push                        # 3. GitHub Pages redeploys
 ```
+
+The wasm surface is three things: stateless `run_core` / `run_demo` exports (one rule evaluation + fact-chain append + audit-chain verification per call), a stateful `EvoRuleEngine` class (`load_rules` → `execute_instruction` → pause on `io_required` → `resolve_io` → `get_audit_chain` / `verify_audit_chain` / `rewind` / `reset`), and `engine_version` (crate version + pinned kernel tag) shown in the demo footer.
+
+Kernel crates — evorule-tcb / evorule-reactor / evorule-governance — are git dependencies pinned by tag. `constitution/core_eval.json` is an embedded copy of that tag's constitution, kept in lockstep with the pin: drift fails visibly via the `constitution_matches_synced_hash` test (upgrade flow: `constitution/README.md`).
+
+## License
+
+**AGPL-3.0-or-later** (unified across the ecosystem): [LICENSE](LICENSE), with closed-source use under [DUAL_LICENSE.md](DUAL_LICENSE.md), [FREE_COMMERCIAL_LICENSE.md](FREE_COMMERCIAL_LICENSE.md) (free waiver for eligible entities), or [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md). Third-party notices: [NOTICE.md](NOTICE.md).
+
+[badge-ci]: https://github.com/evorule/evorule-wasm-demo/actions/workflows/ci.yml/badge.svg
+[ci-link]: https://github.com/evorule/evorule-wasm-demo/actions/workflows/ci.yml
+[badge-license]: https://img.shields.io/badge/license-AGPL--3.0--or--later-blue?style=flat-square
+[license-link]: LICENSE
