@@ -198,7 +198,7 @@ dependencies = [
 [[package]]
 name = "evorule-governance"
 version = "0.8.5"
-source = "git+https://gitee.com/evorule/evorule.git?tag=v0.8.5#eb0c95fbb883b2522da9a36a93613d32f4d95bd3"
+source = "git+https://github.com/evorule/evorule.git?tag=v0.8.5#eb0c95fbb883b2522da9a36a93613d32f4d95bd3"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -216,7 +216,7 @@ dependencies = [
 [[package]]
 name = "evorule-reactor"
 version = "0.8.5"
-source = "git+https://gitee.com/evorule/evorule.git?tag=v0.8.5#eb0c95fbb883b2522da9a36a93613d32f4d95bd3"
+source = "git+https://github.com/evorule/evorule.git?tag=v0.8.5#eb0c95fbb883b2522da9a36a93613d32f4d95bd3"
 dependencies = [
  "async-trait",
  "blake3",
@@ -229,7 +229,7 @@ dependencies = [
 [[package]]
 name = "evorule-tcb"
 version = "0.8.5"
-source = "git+https://gitee.com/evorule/evorule.git?tag=v0.8.5#eb0c95fbb883b2522da9a36a93613d32f4d95bd3"
+source = "git+https://github.com/evorule/evorule.git?tag=v0.8.5#eb0c95fbb883b2522da9a36a93613d32f4d95bd3"
 
 [[package]]
 name = "evorule-wasm-demo"
