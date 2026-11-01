@@ -13,9 +13,9 @@ crate-type = ["cdylib", "rlib"]
 # 同版同步（见 constitution/README 与 build.rs 的 pin 解析）。本地开发
 # 可临时加 [patch] 指向同级内核检出（不提交，见 README「本地开发」节）
 [dependencies]
-evorule-governance = { git = "https://gitee.com/evorule/evorule.git", tag = "v0.8.5" }
-evorule-reactor = { git = "https://gitee.com/evorule/evorule.git", tag = "v0.8.5" }
-evorule-tcb = { git = "https://gitee.com/evorule/evorule.git", tag = "v0.8.5" }
+evorule-governance = { git = "https://github.com/evorule/evorule.git", tag = "v0.8.5" }
+evorule-reactor = { git = "https://github.com/evorule/evorule.git", tag = "v0.8.5" }
+evorule-tcb = { git = "https://github.com/evorule/evorule.git", tag = "v0.8.5" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # 存证层哈希计算（wasm32 兼容；宪法断言测试共用）
